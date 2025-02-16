@@ -15,6 +15,7 @@ import (
 	"github.com/hashicorp/go-azure-helpers/lang/response"
 	"github.com/hashicorp/go-azure-helpers/resourcemanager/commonids"
 	"github.com/hashicorp/go-azure-helpers/resourcemanager/commonschema"
+	"github.com/hashicorp/go-cty/cty"
 	"github.com/hashicorp/terraform-provider-azurerm/helpers/tf"
 	"github.com/hashicorp/terraform-provider-azurerm/internal/clients"
 	"github.com/hashicorp/terraform-provider-azurerm/internal/services/keyvault/parse"
@@ -57,9 +58,23 @@ func resourceKeyVaultSecret() *pluginsdk.Resource {
 			"key_vault_id": commonschema.ResourceIDReferenceRequiredForceNew(&commonids.KeyVaultId{}),
 
 			"value": {
-				Type:      pluginsdk.TypeString,
-				Required:  true,
-				Sensitive: true,
+				Type:         pluginsdk.TypeString,
+				Optional:     true,
+				Sensitive:    true,
+				ExactlyOneOf: []string{"value", "value_wo"},
+			},
+
+			"value_wo": {
+				Type:         pluginsdk.TypeString,
+				Optional:     true,
+				Sensitive:    true,
+				WriteOnly:    true,
+				ExactlyOneOf: []string{"value", "value_wo"},
+			},
+
+			"has_value_wo": {
+				Type:     pluginsdk.TypeBool,
+				Computed: true,
 			},
 
 			"content_type": {
@@ -134,7 +149,7 @@ func resourceKeyVaultSecretCreate(d *pluginsdk.ResourceData, meta interface{}) e
 		return tf.ImportAsExistsError("azurerm_key_vault_secret", *existing.ID)
 	}
 
-	value := d.Get("value").(string)
+	value := getSecretValue(d)
 	contentType := d.Get("content_type").(string)
 	t := d.Get("tags").(map[string]interface{})
 
@@ -243,7 +258,8 @@ func resourceKeyVaultSecretUpdate(d *pluginsdk.ResourceData, meta interface{}) e
 		return nil
 	}
 
-	value := d.Get("value").(string)
+	value := getSecretValue(d)
+
 	contentType := d.Get("content_type").(string)
 	t := d.Get("tags").(map[string]interface{})
 
@@ -357,7 +373,6 @@ func resourceKeyVaultSecretRead(d *pluginsdk.ResourceData, meta interface{}) err
 	}
 
 	d.Set("name", respID.Name)
-	d.Set("value", resp.Value)
 	d.Set("version", respID.Version)
 	d.Set("content_type", resp.ContentType)
 	d.Set("versionless_id", id.VersionlessID())
@@ -374,6 +389,17 @@ func resourceKeyVaultSecretRead(d *pluginsdk.ResourceData, meta interface{}) err
 
 	d.Set("resource_id", parse.NewSecretID(keyVaultId.SubscriptionId, keyVaultId.ResourceGroupName, keyVaultId.VaultName, id.Name, id.Version).ID())
 	d.Set("resource_versionless_id", parse.NewSecretVersionlessID(keyVaultId.SubscriptionId, keyVaultId.ResourceGroupName, keyVaultId.VaultName, id.Name).ID())
+
+	hasWriteOnly := d.Get("has_value_wo").(bool)
+	if !hasWriteOnly {
+		if getValueWo(d) != "" {
+			hasWriteOnly = true
+		}
+	}
+	if hasWriteOnly {
+		d.Set("has_value_wo", true)
+		d.Set("value", nil)
+	}
 
 	return tags.FlattenAndSet(d, resp.Tags)
 }
@@ -430,6 +456,24 @@ func resourceKeyVaultSecretDelete(d *pluginsdk.ResourceData, meta interface{}) e
 	}
 
 	return nil
+}
+
+func getSecretValue(d *pluginsdk.ResourceData) string {
+	if v, ok := d.GetOk("value"); ok {
+		return v.(string)
+	}
+	if v := getValueWo(d); v != "" {
+		return v
+	}
+	panic("something went wrong")
+}
+
+func getValueWo(d *pluginsdk.ResourceData) string {
+	valueWo, _ := d.GetRawConfigAt(cty.GetAttrPath("value_wo"))
+	if valueWo.Type().Equals(cty.String) && !valueWo.IsNull() {
+		return valueWo.AsString()
+	}
+	return ""
 }
 
 var _ deleteAndPurgeNestedItem = deleteAndPurgeSecret{}
